@@ -134,23 +134,25 @@ Extracts image resolution using ExifTool, supporting multiple output formats.
 #### get_image_resolution()
 
 ```python
-def get_image_resolution(image_path: Path, exiftool_available: bool) -> Optional[Tuple[int, int]]:
-    """Get the resolution of an image, using ExifTool for RAW files."""
+def get_image_resolution(image_path: Path, exiftool_available: bool, force_exiftool: bool = False) -> Optional[Tuple[int, int]]:
+    """Get the resolution of an image, using ExifTool for RAW files or when forced."""
 ```
 
-Smart resolution extraction with fallback strategies.
+Smart resolution extraction with fallback strategies and forced ExifTool support.
 
 **Parameters:**
 - `image_path` (`Path`): Path to the image file
 - `exiftool_available` (`bool`): Whether ExifTool is available
+- `force_exiftool` (`bool`): Force use of ExifTool for all image types (default: False)
 
 **Returns:**
 - `Optional[Tuple[int, int]]`: Image dimensions or None if failed
 
 **Strategy:**
-1. For .ARW files: Use ExifTool if available
-2. For standard formats: Try PIL first, fallback to ExifTool
-3. Return None if all methods fail
+1. If `force_exiftool` is True: Always use ExifTool when available
+2. For .ARW files: Use ExifTool if available
+3. For standard formats: Try PIL first, fallback to ExifTool (unless forced)
+4. Return None if all methods fail
 
 **Supported Extensions:**
 - RAW: `.arw`
@@ -197,15 +199,16 @@ Retrieves file size using path statistics.
 #### process_single_image()
 
 ```python
-def process_single_image(image_path: Path, exiftool_available: bool) -> Optional[ImageMetadata]:
+def process_single_image(image_path: Path, exiftool_available: bool, force_exiftool: bool = False) -> Optional[ImageMetadata]:
     """Process a single image to extract all metadata."""
 ```
 
-Comprehensive metadata extraction for a single image file.
+Comprehensive metadata extraction for a single image file with optional forced ExifTool usage.
 
 **Parameters:**
 - `image_path` (`Path`): Path to the image file
 - `exiftool_available` (`bool`): Whether ExifTool is available for metadata extraction
+- `force_exiftool` (`bool`): Force use of ExifTool for all metadata extraction (default: False)
 
 **Returns:**
 - `Optional[ImageMetadata]`: Complete metadata object or None if processing failed
@@ -225,15 +228,16 @@ Comprehensive metadata extraction for a single image file.
 #### process_images_parallel()
 
 ```python
-def process_images_parallel(directory: str, max_workers: Optional[int] = None) -> Dict[Tuple, List[ImageMetadata]]:
+def process_images_parallel(directory: str, max_workers: Optional[int] = None, force_exiftool: bool = False) -> Dict[Tuple, List[ImageMetadata]]:
     """Process images in parallel using ThreadPoolExecutor."""
 ```
 
-Main processing function that handles concurrent image analysis and duplicate detection.
+Main processing function that handles concurrent image analysis and duplicate detection with optional forced ExifTool usage.
 
 **Parameters:**
 - `directory` (`str`): Root directory to scan for images
 - `max_workers` (`Optional[int]`): Maximum worker threads (default: `min(32, cpu_count() * 4)`)
+- `force_exiftool` (`bool`): Force use of ExifTool for all metadata extraction (default: False)
 
 **Returns:**
 - `Dict[Tuple, List[ImageMetadata]]`: Dictionary mapping duplicate group identifiers to lists of duplicate images
@@ -249,26 +253,35 @@ Main processing function that handles concurrent image analysis and duplicate de
 #### remove_duplicate_files()
 
 ```python
-def remove_duplicate_files(duplicates: Dict[Tuple, List[ImageMetadata]], auto_select_best: bool = False, group_by_group: bool = True):
-    """Remove duplicate files after confirmation."""
+def remove_duplicate_files(duplicates: Dict[Tuple, List[ImageMetadata]], auto_select_best: bool = False, group_by_group: bool = True, dest_dir: Optional[str] = None):
+    """Remove duplicate files after confirmation, or move them to destination directory."""
 ```
 
-Interactive duplicate file removal with multiple confirmation modes.
+Interactive duplicate file removal or relocation with multiple confirmation modes.
 
 **Parameters:**
 - `duplicates` (`Dict[Tuple, List[ImageMetadata]]`): Duplicate groups from `process_images_parallel()`
 - `auto_select_best` (`bool`): Whether to automatically select highest quality file (default: False)
 - `group_by_group` (`bool`): Whether to confirm each group separately (default: True)
+- `dest_dir` (`Optional[str]`): Destination directory to move duplicates to instead of deleting (default: None)
 
 **Features:**
 - Interactive user confirmation
 - Automatic quality-based selection
-- File permission checking before deletion
+- File permission checking before deletion/moving
 - Detailed statistics reporting
+- Organized destination directory structure with group subdirectories
+- Automatic filename conflict resolution
+
+**Destination Directory Behavior:**
+- Creates subdirectories based on camera model and hash for organization
+- Handles filename conflicts by adding numeric suffixes
+- Uses `shutil.move()` for safe file operations
+- Creates destination directory structure automatically
 
 **Safety:**
 - Requires explicit user confirmation
-- Checks write permissions before deletion
+- Checks write permissions before deletion/moving
 - Provides detailed information about each duplicate group
 
 ---
@@ -351,6 +364,8 @@ python duplicated_img_detect_improved.py directory [OPTIONS]
 | `--remove_duplicates` | `flag` | `False` | Remove duplicated files after confirmation |
 | `--auto_select_best` | `flag` | `False` | Automatically select best quality file to keep |
 | `--group_by_group` | `flag` | `False` | Ask for confirmation for each duplicate group |
+| `--force_exiftool` | `flag` | `False` | Force use of ExifTool for all metadata extraction (requires ExifTool) |
+| `--dest_dir` | `str` | `None` | Destination directory to move duplicated photo groups to instead of deleting |
 | `--verbose` | `flag` | `False` | Enable verbose logging (DEBUG level) |
 
 ### Exit Codes
@@ -414,6 +429,64 @@ best_file = duplicates[best_idx]
 print(f"Best file: {best_file.path}")
 print(f"Size: {format_file_size(best_file.file_size)}")
 print(f"Resolution: {best_file.resolution}")
+```
+
+### Force ExifTool Usage
+
+```python
+from duplicated_img_detect_improved import process_images_parallel
+
+# Force ExifTool for all metadata extraction
+duplicates = process_images_parallel("/path/to/photos", force_exiftool=True)
+
+# This will use ExifTool for all image types, not just RAW files
+for identifier, group in duplicates.items():
+    print(f"Processed {len(group)} images with ExifTool")
+```
+
+### Move Duplicates to Destination Directory
+
+```python
+from duplicated_img_detect_improved import process_images_parallel, remove_duplicate_files
+
+# Scan for duplicates
+duplicates = process_images_parallel("/path/to/photos")
+
+# Move duplicates to organized destination directory instead of deleting
+remove_duplicate_files(
+    duplicates, 
+    auto_select_best=True,
+    group_by_group=False,
+    dest_dir="/path/to/duplicate_archive"
+)
+
+# This creates subdirectories like:
+# /path/to/duplicate_archive/Canon_EOS_R5_1a2b3c4d/IMG_001.jpg
+# /path/to/duplicate_archive/Canon_EOS_R5_1a2b3c4d/IMG_002.jpg
+```
+
+### Command Line Usage Examples
+
+```bash
+# Basic duplicate detection with listing
+python duplicated_img_detect_improved.py /path/to/photos --list_duplicates
+
+# Force ExifTool for all metadata extraction
+python duplicated_img_detect_improved.py /path/to/photos --force_exiftool --verbose
+
+# Move duplicates to archive directory instead of deleting
+python duplicated_img_detect_improved.py /path/to/photos \
+    --remove_duplicates \
+    --dest_dir /path/to/duplicate_archive \
+    --auto_select_best
+
+# Comprehensive processing with all new features
+python duplicated_img_detect_improved.py /path/to/photos \
+    --remove_duplicates \
+    --force_exiftool \
+    --dest_dir /path/to/duplicate_archive \
+    --group_by_group \
+    --verbose
 ```
 
 ---

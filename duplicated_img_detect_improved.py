@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 import os
 import hashlib
+import shutil
 import sys
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
@@ -98,15 +99,19 @@ def get_image_resolution_exiftool(image_path: Path) -> Optional[Tuple[int, int]]
         logger.error(f"Error getting resolution with ExifTool for {image_path}: {str(e)}")
         return None
 
-def get_image_resolution(image_path: Path, exiftool_available: bool) -> Optional[Tuple[int, int]]:
-    """Get the resolution of an image, using ExifTool for RAW files."""
+def get_image_resolution(image_path: Path, exiftool_available: bool, force_exiftool: bool = False) -> Optional[Tuple[int, int]]:
+    """Get the resolution of an image, using ExifTool for RAW files or when forced."""
     file_ext = image_path.suffix.lower()
+    
+    # If force_exiftool is enabled, always use ExifTool when available
+    if force_exiftool and exiftool_available:
+        return get_image_resolution_exiftool(image_path)
     
     # For RAW files, use ExifTool if available
     if file_ext == '.arw' and exiftool_available:
         return get_image_resolution_exiftool(image_path)
     
-    # For standard image formats, try PIL first
+    # For standard image formats, try PIL first (unless force_exiftool is enabled)
     if file_ext in {'.jpg', '.jpeg', '.png', '.tiff', '.tif', '.gif', '.bmp'}:
         try:
             with Image.open(image_path) as img:
@@ -143,7 +148,7 @@ def get_file_size(image_path: Path) -> int:
         logger.error(f"Error getting file size for {image_path}: {str(e)}")
         return 0
 
-def process_single_image(image_path: Path, exiftool_available: bool) -> Optional[ImageMetadata]:
+def process_single_image(image_path: Path, exiftool_available: bool, force_exiftool: bool = False) -> Optional[ImageMetadata]:
     """Process a single image to extract all metadata."""
     try:
         # Check file permissions
@@ -161,8 +166,8 @@ def process_single_image(image_path: Path, exiftool_available: bool) -> Optional
         # Get image hash
         _, img_hash = calculate_image_hash(image_path)
         
-        # Get resolution
-        resolution = get_image_resolution(image_path, exiftool_available)
+        # Get resolution (force exiftool if requested)
+        resolution = get_image_resolution(image_path, exiftool_available, force_exiftool)
             
         return ImageMetadata(
             path=image_path,
@@ -175,11 +180,18 @@ def process_single_image(image_path: Path, exiftool_available: bool) -> Optional
         logger.error(f"Error processing {image_path}: {str(e)}")
         return None
 
-def process_images_parallel(directory: str, max_workers: Optional[int] = None) -> Dict[Tuple, List[ImageMetadata]]:
+def process_images_parallel(directory: str, max_workers: Optional[int] = None, force_exiftool: bool = False) -> Dict[Tuple, List[ImageMetadata]]:
     """Process images in parallel using ThreadPoolExecutor."""
     # Check if ExifTool is available
     exiftool_available = check_exiftool_exists()
-    if not exiftool_available:
+    
+    if force_exiftool and not exiftool_available:
+        logger.error("--force_exiftool specified but ExifTool is not available. Please install ExifTool.")
+        sys.exit(1)
+    elif force_exiftool:
+        logger.info("Force ExifTool mode enabled - using ExifTool for all metadata extraction")
+        exiftool_available = True
+    elif not exiftool_available:
         logger.warning("ExifTool not found. Metadata extraction will be limited.")
     
     # If max_workers not specified, use a reasonable default
@@ -198,7 +210,7 @@ def process_images_parallel(directory: str, max_workers: Optional[int] = None) -
     image_metadata_list: List[ImageMetadata] = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_path = {
-            executor.submit(process_single_image, path, exiftool_available): path 
+            executor.submit(process_single_image, path, exiftool_available, force_exiftool): path 
             for path in image_paths
         }
         
@@ -253,18 +265,31 @@ def suggest_best_file(duplicates: List[ImageMetadata]) -> int:
             
     return best_idx
 
-def remove_duplicate_files(duplicates: Dict[Tuple, List[ImageMetadata]], auto_select_best: bool = False, group_by_group: bool = True):
-    """Remove duplicate files after confirmation."""
+def remove_duplicate_files(duplicates: Dict[Tuple, List[ImageMetadata]], auto_select_best: bool = False, group_by_group: bool = True, dest_dir: Optional[str] = None):
+    """Remove duplicate files after confirmation, or move them to destination directory."""
     duplicate_count = sum(len(group) - 1 for group in duplicates.values())
     logger.info(f"Found {len(duplicates)} groups with {duplicate_count} total duplicate files.")
     
-    if not group_by_group:
-        user_input = input("Do you want to remove duplicated files? (yes/no): ").strip().lower()
-        if user_input != 'yes':
-            print("Removal canceled.")
+    # Prepare destination directory if specified
+    dest_path = None
+    if dest_dir:
+        dest_path = Path(dest_dir)
+        try:
+            dest_path.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Using destination directory: {dest_path}")
+        except Exception as e:
+            logger.error(f"Error creating destination directory {dest_path}: {str(e)}")
             return
     
-    total_removed = 0
+    action_verb = "move to destination directory" if dest_dir else "remove"
+    
+    if not group_by_group:
+        user_input = input(f"Do you want to {action_verb} duplicated files? (yes/no): ").strip().lower()
+        if user_input != 'yes':
+            print(f"{action_verb.capitalize()} canceled.")
+            return
+    
+    total_processed = 0
     total_space_saved = 0
     
     for key, dup_metadata in duplicates.items():
@@ -302,21 +327,53 @@ def remove_duplicate_files(duplicates: Dict[Tuple, List[ImageMetadata]], auto_se
                 print("  Invalid input. Keeping file #1.")
                 keep_idx = 0
         
-        # Remove all files except the one to keep
+        # Create subdirectory for this duplicate group in destination if specified
+        group_dest_dir = None
+        if dest_path:
+            # Create a safe directory name based on hash and camera model
+            safe_camera = (camera_model or "unknown").replace("/", "_").replace("\\", "_") if camera_model else "unknown"
+            hash_prefix = img_hash[:8] if img_hash else "unknown"
+            group_name = f"{safe_camera}_{hash_prefix}"
+            group_dest_dir = dest_path / group_name
+            try:
+                group_dest_dir.mkdir(exist_ok=True)
+            except Exception as e:
+                logger.error(f"Error creating group directory {group_dest_dir}: {str(e)}")
+                continue
+        
+        # Process all files except the one to keep
         for idx, metadata in enumerate(dup_metadata):
             if idx != keep_idx:
                 try:
                     if os.access(metadata.path, os.W_OK):
-                        os.remove(metadata.path)
-                        print(f"  Removed: {metadata.path}")
-                        total_removed += 1
+                        if dest_path and group_dest_dir:
+                            # Move to destination directory
+                            dest_file_path = group_dest_dir / metadata.path.name
+                            
+                            # Handle filename conflicts by adding a counter
+                            counter = 1
+                            while dest_file_path.exists():
+                                stem = metadata.path.stem
+                                suffix = metadata.path.suffix
+                                dest_file_path = group_dest_dir / f"{stem}_{counter}{suffix}"
+                                counter += 1
+                            
+                            shutil.move(str(metadata.path), str(dest_file_path))
+                            print(f"  Moved: {metadata.path} -> {dest_file_path}")
+                        else:
+                            # Remove file
+                            os.remove(metadata.path)
+                            print(f"  Removed: {metadata.path}")
+                        
+                        total_processed += 1
                         total_space_saved += metadata.file_size
                     else:
-                        print(f"  No permission to remove: {metadata.path}")
+                        print(f"  No permission to {action_verb}: {metadata.path}")
                 except Exception as e:
-                    logger.error(f"Error removing {metadata.path}: {str(e)}")
+                    logger.error(f"Error {action_verb.replace(' to destination directory', 'ing')} {metadata.path}: {str(e)}")
     
-    print(f"\nRemoval complete. Removed {total_removed} files, saving {format_file_size(total_space_saved)}.")
+    action_past = "moved to destination directory" if dest_dir else "removed"
+    print(f"\nOperation complete. {action_past.capitalize()} {total_processed} files, saving {format_file_size(total_space_saved)}.")
 
 def parse_arguments():
     """Parse command line arguments."""
@@ -331,6 +388,10 @@ def parse_arguments():
                         help="Automatically select the best quality file to keep (based on resolution and size)")
     parser.add_argument("--group_by_group", action='store_true', 
                         help="Ask for confirmation for each group of duplicates separately")
+    parser.add_argument("--force_exiftool", action='store_true', 
+                        help="Force use of exiftool for all metadata extraction (requires exiftool to be installed)")
+    parser.add_argument("--dest_dir", type=str, 
+                        help="Destination directory to move duplicated photo groups to instead of deleting them")
     parser.add_argument("--verbose", action='store_true', help="Enable verbose logging")
 
     return parser.parse_args()
@@ -347,7 +408,7 @@ if __name__ == "__main__":
         sys.exit(1)
     
     logger.info(f"Scanning directory: {args.directory}")
-    duplicates = process_images_parallel(args.directory, max_workers=args.max_workers)
+    duplicates = process_images_parallel(args.directory, max_workers=args.max_workers, force_exiftool=args.force_exiftool)
 
     for key, dup_metadata in duplicates.items():
         camera_model, img_hash, resolution, _ = key
@@ -362,4 +423,4 @@ if __name__ == "__main__":
                 print(f"      Size: {format_file_size(metadata.file_size)}, Resolution: {resolution_str}")
                 
     if args.remove_duplicates:
-        remove_duplicate_files(duplicates, auto_select_best=args.auto_select_best, group_by_group=args.group_by_group)
+        remove_duplicate_files(duplicates, auto_select_best=args.auto_select_best, group_by_group=args.group_by_group, dest_dir=args.dest_dir)
