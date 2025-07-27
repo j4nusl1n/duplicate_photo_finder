@@ -147,20 +147,20 @@ duplicated_img_detect_improved.py
 │   ├── get_camera_model_single()
 │   └── get_image_resolution_exiftool()
 ├── Metadata Extraction
-│   ├── get_image_resolution()
+│   ├── get_image_resolution() [Updated: force_exiftool parameter]
 │   ├── calculate_image_hash()
 │   └── get_file_size()
 ├── Core Processing
-│   ├── process_single_image()
-│   └── process_images_parallel()
+│   ├── process_single_image() [Updated: force_exiftool parameter]
+│   └── process_images_parallel() [Updated: force_exiftool parameter]
 ├── File Management
 │   ├── suggest_best_file()
-│   └── remove_duplicate_files()
+│   └── remove_duplicate_files() [Updated: dest_dir parameter]
 ├── Utilities
 │   ├── format_file_size()
-│   └── parse_arguments()
+│   └── parse_arguments() [Updated: new CLI options]
 └── Entry Point
-    └── if __name__ == "__main__"
+    └── if __name__ == "__main__" [Updated: new argument handling]
 ```
 
 ### Design Patterns
@@ -181,8 +181,13 @@ class ImageMetadata:
 
 #### 2. Strategy Pattern
 ```python
-def get_image_resolution(image_path: Path, exiftool_available: bool):
-    """Different strategies based on file type and tool availability."""
+def get_image_resolution(image_path: Path, exiftool_available: bool, force_exiftool: bool = False):
+    """Different strategies based on file type, tool availability, and user preferences."""
+    # Force ExifTool if requested and available
+    if force_exiftool and exiftool_available:
+        return get_image_resolution_exiftool(image_path)
+    
+    # Use ExifTool for RAW files
     if file_ext == '.arw' and exiftool_available:
         return get_image_resolution_exiftool(image_path)
     elif file_ext in standard_formats:
@@ -192,13 +197,32 @@ def get_image_resolution(image_path: Path, exiftool_available: bool):
 
 #### 3. Factory Pattern
 ```python
-def process_images_parallel(directory: str, max_workers: Optional[int] = None):
-    """Factory for creating ThreadPoolExecutor with smart defaults."""
+def process_images_parallel(directory: str, max_workers: Optional[int] = None, force_exiftool: bool = False):
+    """Factory for creating ThreadPoolExecutor with smart defaults and tool validation."""
+    # Validate ExifTool requirement if forced
+    exiftool_available = check_exiftool_exists()
+    if force_exiftool and not exiftool_available:
+        sys.exit("ExifTool required but not available")
+    
     if max_workers is None:
         max_workers = min(32, (os.cpu_count() or 1) * 4)
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # ... processing logic
+        # ... processing logic with force_exiftool parameter
+```
+
+#### 4. Command Pattern (File Operations)
+```python
+def remove_duplicate_files(duplicates, auto_select_best=False, group_by_group=True, dest_dir=None):
+    """Command pattern for file operations - delete or move based on configuration."""
+    if dest_dir:
+        # Move command with organized directory structure
+        for group in duplicates:
+            group_dest = create_group_directory(dest_dir, group_metadata)
+            shutil.move(file_path, group_dest)
+    else:
+        # Delete command
+        os.remove(file_path)
 ```
 
 ### Data Flow
@@ -392,7 +416,7 @@ class TestImageMetadata:
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-from duplicated_img_detect_improved import check_exiftool_exists, calculate_image_hash
+from duplicated_img_detect_improved import check_exiftool_exists, calculate_image_hash, get_image_resolution
 
 class TestExifToolIntegration:
     @pytest.mark.requires_exiftool
@@ -405,6 +429,22 @@ class TestExifToolIntegration:
         """Test ExifTool detection when tool is not available."""
         mock_run.side_effect = FileNotFoundError()
         assert check_exiftool_exists() is False
+    
+    @pytest.mark.requires_exiftool
+    def test_force_exiftool_standard_image(self, sample_jpg_file):
+        """Test forced ExifTool usage on standard image formats."""
+        # Should use ExifTool instead of PIL when forced
+        resolution = get_image_resolution(sample_jpg_file, exiftool_available=True, force_exiftool=True)
+        assert resolution is not None
+        assert isinstance(resolution, tuple)
+        assert len(resolution) == 2
+    
+    def test_force_exiftool_unavailable_error(self, sample_jpg_file):
+        """Test error handling when ExifTool is forced but unavailable."""
+        with patch('duplicated_img_detect_improved.check_exiftool_exists', return_value=False):
+            with pytest.raises(SystemExit):
+                from duplicated_img_detect_improved import process_images_parallel
+                process_images_parallel(str(sample_jpg_file.parent), force_exiftool=True)
 
 class TestHashCalculation:
     def test_calculate_image_hash_success(self, tmp_path):
@@ -424,6 +464,77 @@ class TestHashCalculation:
         path, hash_value = calculate_image_hash(Path("nonexistent.jpg"))
         
         assert hash_value is None
+```
+
+**test_file_operations.py:**
+```python
+import pytest
+from pathlib import Path
+from unittest.mock import patch
+from duplicated_img_detect_improved import remove_duplicate_files, ImageMetadata
+
+class TestFileOperations:
+    def test_remove_duplicates_with_destination_directory(self, tmp_path):
+        """Test moving duplicates to destination directory."""
+        # Setup test files
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        dest_dir = tmp_path / "destination"
+        
+        test_file1 = source_dir / "image1.jpg"
+        test_file2 = source_dir / "image2.jpg"
+        test_file1.write_bytes(b"test image content")
+        test_file2.write_bytes(b"test image content")
+        
+        # Create metadata for duplicates
+        metadata1 = ImageMetadata(
+            path=test_file1, file_size=100, hash="abc123",
+            camera_model="Canon EOS R5", resolution=(1920, 1080)
+        )
+        metadata2 = ImageMetadata(
+            path=test_file2, file_size=100, hash="abc123",
+            camera_model="Canon EOS R5", resolution=(1920, 1080)
+        )
+        
+        duplicates = {
+            ("Canon EOS R5", "abc123", (1920, 1080), 100): [metadata1, metadata2]
+        }
+        
+        # Mock user input to select first file and proceed
+        with patch('builtins.input', side_effect=['yes', '1']):
+            remove_duplicate_files(
+                duplicates, 
+                auto_select_best=False,
+                group_by_group=False,
+                dest_dir=str(dest_dir)
+            )
+        
+        # Verify destination directory structure
+        assert dest_dir.exists()
+        group_dir = dest_dir / "Canon_EOS_R5_abc123de"
+        assert group_dir.exists()
+        
+        # Verify one file was moved
+        moved_files = list(group_dir.glob("*.jpg"))
+        assert len(moved_files) == 1
+        
+        # Verify source file still exists (the one that was kept)
+        remaining_files = list(source_dir.glob("*.jpg"))
+        assert len(remaining_files) == 1
+    
+    def test_destination_directory_creation_error(self, tmp_path):
+        """Test handling of destination directory creation errors."""
+        # Try to create destination in read-only directory
+        readonly_dir = tmp_path / "readonly"
+        readonly_dir.mkdir(mode=0o444)  # Read-only
+        
+        duplicates = {}  # Empty for simplicity
+        
+        # Should handle gracefully and return early
+        remove_duplicate_files(duplicates, dest_dir=str(readonly_dir / "nested"))
+        
+        # Should not crash, just log error and return
+        assert True  # Test passes if no exception raised
 ```
 
 ### Integration Testing

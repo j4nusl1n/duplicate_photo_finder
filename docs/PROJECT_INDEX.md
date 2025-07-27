@@ -12,6 +12,8 @@ This project provides an efficient solution for photographers and digital asset 
 - **High Performance**: Multi-threaded parallel processing
 - **Memory Efficient**: Chunked file reading for large files
 - **RAW Format Support**: Sony .ARW files via ExifTool integration
+- **Advanced ExifTool Support**: Force ExifTool usage for all image types
+- **Flexible File Management**: Move duplicates to organized destination directories instead of deletion
 - **User-Friendly**: Interactive confirmation and automatic quality selection
 - **Comprehensive Logging**: Detailed operation logs for troubleshooting
 
@@ -90,6 +92,12 @@ python duplicated_img_detect_improved.py /path/to/photos --remove_duplicates
 
 # Auto-select best quality files
 python duplicated_img_detect_improved.py /path/to/photos --remove_duplicates --auto_select_best
+
+# Force ExifTool usage for all metadata extraction
+python duplicated_img_detect_improved.py /path/to/photos --force_exiftool
+
+# Move duplicates to organized archive instead of deleting
+python duplicated_img_detect_improved.py /path/to/photos --remove_duplicates --dest_dir /path/to/archive
 ```
 
 ## 📖 Documentation Structure
@@ -167,6 +175,8 @@ if __name__ == "__main__":
 ## 🎯 Roadmap
 
 ### Short Term (v0.2.0)
+- [x] Force ExifTool usage option
+- [x] Destination directory for duplicates
 - [ ] Unit test suite
 - [ ] Configuration file support
 - [ ] Progress indicators
